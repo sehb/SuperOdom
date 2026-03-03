@@ -27,6 +27,14 @@
         mapping_plane_resolution: 0.2
         max_iterations: 5
         max_surface_features: 2000
+        enable_visual_fusion: true
+        visual_confidence_factor: 1.0
+        visual_confidence_min: 0.15
+        imu_odom_topic: "/state_estimation"
+        visual_odom_topic: "/visual_odometry"
+        max_odom_time_diff: 0.08
+        max_visual_linear_velocity: 8.0
+        max_visual_angular_velocity: 4.0
 
         # For localization mode
         localization_mode: false
@@ -47,4 +55,23 @@
         acc_w: 6.4356659353532566e-05          # accelerometer bias random work noise standard deviation.  #0.02
         gyr_w: 3.5640318696367613e-05       # gyroscope bias random work noise standard deviation.     #4.0e-5
         g_norm: 9.80511    # 0 means you need to provide both imu-camera and laser-camera extrinsic
+
+    # Visual Odometry Params
+    visual_odometry_node:
+        image_topic: "/camera/image_raw"
+        imu_odom_topic: "/state_estimation"
+        output_topic: "/visual_odometry"
+        max_features: 1000
+        min_matches: 80
+        min_inliers: 35
+        fx: 525.0
+        fy: 525.0
+        cx: 319.5
+        cy: 239.5
+        max_time_diff_s: 0.05
+        max_visual_speed: 15.0
+        max_imu_speed_for_scale: 15.0
+        min_imu_scale: 0.01
+        max_imu_scale: 1.5
+        imu_rotation_weight: 0.3
 

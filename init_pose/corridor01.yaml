@@ -1,0 +1,16 @@
+%YAML:1.0
+
+# s 67
+extrinsicRotation_world_darpa: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [0.135990, -0.990409, -0.024406,
+         0.990705, 0.136027, 0.000140,
+         0.003181, -0.024198, 0.999702]
+
+extrinsicTranslation_world_darpa: !!opencv-matrix
+  rows: 3
+  cols: 1
+  dt: d
+  data: [1.968147, -6.879292, -0.896125]

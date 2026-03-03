@@ -1,6 +1,7 @@
 
 // LOCAL
 #include "super_odometry/LidarProcess/LidarSlam.h"
+#include <algorithm>
 
 //TODO: add to header file
 double pose_parameters[7] = {0, 0, 0, 0, 0, 0, 1};
@@ -290,13 +291,14 @@ namespace super_odometry {
 
     void LidarSLAM::addAbsolutePoseConstraints(ceres::Problem&problem, const Transformd&position, int good_feature_num){
         //Add absolute pose constraint 
+       const double visual_confidence = std::clamp(static_cast<double>(Current_visual_confidence), 0.0, 1.0);
        Eigen::Matrix<double, 6, 6, Eigen::RowMajor> information;
        information.setIdentity();
-       information(0, 0) =(1 - lidarOdomUncer.uncertainty_x) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor;
-       information(1, 1) =(1 - lidarOdomUncer.uncertainty_y) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor;
-       information(2, 2) =(1 - lidarOdomUncer.uncertainty_z) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor;
-       information(3, 3) = std::max(10, int(good_feature_num*0.01)) * Visual_confidence_factor;
-       information(4, 4) = std::max(10, int(good_feature_num*0.01)) * Visual_confidence_factor;
+       information(0, 0) =(1 - lidarOdomUncer.uncertainty_x) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor * visual_confidence;
+       information(1, 1) =(1 - lidarOdomUncer.uncertainty_y) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor * visual_confidence;
+       information(2, 2) =(1 - lidarOdomUncer.uncertainty_z) * std::max(50, int(good_feature_num*0.1))* Visual_confidence_factor * visual_confidence;
+       information(3, 3) = std::max(10, int(good_feature_num*0.01)) * Visual_confidence_factor * visual_confidence;
+       information(4, 4) = std::max(10, int(good_feature_num*0.01)) * Visual_confidence_factor * visual_confidence;
        information(5, 5) = std::max(5, int(good_feature_num*0.001)) * 0;     
        SE3AbsolutatePoseFactor *absolutatePoseFactor=new SE3AbsolutatePoseFactor(position, information);
        problem.AddResidualBlock(absolutatePoseFactor, nullptr, pose_parameters);

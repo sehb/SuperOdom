@@ -55,6 +55,16 @@ namespace super_odometry {
             ProjectName+"/feature_info", 2,
             std::bind(&laserMapping::laserFeatureInfoHandler, this,
                         std::placeholders::_1), sub_options);
+
+        subIMUOdometry = this->create_subscription<nav_msgs::msg::Odometry>(
+            config_.imu_odom_topic, 50,
+            std::bind(&laserMapping::handleImuOdometry, this, std::placeholders::_1), sub_options);
+
+        if (config_.enable_visual_fusion) {
+            subVisualOdometry = this->create_subscription<nav_msgs::msg::Odometry>(
+                config_.visual_odom_topic, 50,
+                std::bind(&laserMapping::handleVisualOdometry, this, std::placeholders::_1), sub_options);
+        }
                         
 
         pubLaserCloudSurround = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -103,6 +113,7 @@ namespace super_odometry {
         slam.localMap.lineRes_ = config_.lineRes;
         slam.localMap.planeRes_ = config_.planeRes;
         slam.Visual_confidence_factor=config_.visual_confidence_factor;
+        slam.Current_visual_confidence = 0.0f;
         slam.Pos_degeneracy_threshold=config_.pos_degeneracy_threshold;
         slam.Ori_degeneracy_threshold=config_.ori_degeneracy_threshold;
         slam.LocalizationICPMaxIter=config_.max_iterations;
@@ -154,6 +165,12 @@ namespace super_odometry {
         t_wodom_curr = t_wodom_curr_;
         q_wodom_pre = q_wodom_pre_;
         t_wodom_pre = t_wodom_pre_;
+        q_w_imu_pre = q_wodom_pre_;
+        t_w_imu_pre = t_wodom_pre_;
+        q_w_visual_pre = q_wodom_pre_;
+        t_w_visual_pre = t_wodom_pre_;
+        visual_prediction_confidence = 0.0;
+        last_visual_odom_available = false;
 
         imu_odom_buf.allocate(5000);
         visual_odom_buf.allocate(5000);
@@ -191,6 +208,15 @@ namespace super_odometry {
         this->declare_parameter("laser_mapping_node.auto_voxel_size", true);
         this->declare_parameter("laser_mapping_node.forget_far_chunks", false);
         this->declare_parameter("laser_mapping_node.visual_confidence_factor", 1.0);
+        this->declare_parameter("laser_mapping_node.visual_confidence_min", 0.15);
+        this->declare_parameter("laser_mapping_node.enable_visual_fusion", true);
+        this->declare_parameter("laser_mapping_node.max_odom_time_diff", 0.08);
+        this->declare_parameter("laser_mapping_node.max_visual_linear_velocity", 8.0);
+        this->declare_parameter("laser_mapping_node.max_visual_angular_velocity", 4.0);
+        this->declare_parameter("laser_mapping_node.pos_degeneracy_threshold", 0.1);
+        this->declare_parameter("laser_mapping_node.ori_degeneracy_threshold", 0.1);
+        this->declare_parameter<std::string>("laser_mapping_node.imu_odom_topic", ProjectName + "/state_estimation");
+        this->declare_parameter<std::string>("laser_mapping_node.visual_odom_topic", ProjectName + "/visual_odometry");
         this->declare_parameter("laser_mapping_node.localization_mode", false); // Add default value!
         this->declare_parameter("laser_mapping_node.read_pose_file", false);
         this->declare_parameter("laser_mapping_node.init_x", 0.0);
@@ -215,6 +241,15 @@ namespace super_odometry {
         config_.auto_voxel_size = this->get_parameter("laser_mapping_node.auto_voxel_size").as_bool();
         config_.forget_far_chunks = this->get_parameter("laser_mapping_node.forget_far_chunks").as_bool();
         config_.visual_confidence_factor = this->get_parameter("laser_mapping_node.visual_confidence_factor").as_double();
+        config_.visual_confidence_min = this->get_parameter("laser_mapping_node.visual_confidence_min").as_double();
+        config_.enable_visual_fusion = this->get_parameter("laser_mapping_node.enable_visual_fusion").as_bool();
+        config_.max_odom_time_diff = this->get_parameter("laser_mapping_node.max_odom_time_diff").as_double();
+        config_.max_visual_linear_velocity = this->get_parameter("laser_mapping_node.max_visual_linear_velocity").as_double();
+        config_.max_visual_angular_velocity = this->get_parameter("laser_mapping_node.max_visual_angular_velocity").as_double();
+        config_.pos_degeneracy_threshold = this->get_parameter("laser_mapping_node.pos_degeneracy_threshold").as_double();
+        config_.ori_degeneracy_threshold = this->get_parameter("laser_mapping_node.ori_degeneracy_threshold").as_double();
+        config_.imu_odom_topic = this->get_parameter("laser_mapping_node.imu_odom_topic").as_string();
+        config_.visual_odom_topic = this->get_parameter("laser_mapping_node.visual_odom_topic").as_string();
         config_.map_dir = this->get_parameter("map_dir").as_string(); 
         config_.localization_mode = this->get_parameter("laser_mapping_node.localization_mode").as_bool();
         config_.read_pose_file = this->get_parameter("laser_mapping_node.read_pose_file").as_bool();
@@ -258,6 +293,185 @@ namespace super_odometry {
 
         IMUPredictionBuf.push(imuprediction_tmp);
         mBuf.unlock();
+    }
+
+    void laserMapping::handleImuOdometry(const nav_msgs::msg::Odometry::SharedPtr msgIn) {
+        std::lock_guard<std::mutex> lock(mBuf);
+        imu_odom_buf.addMeas(msgIn, secs(msgIn));
+    }
+
+    void laserMapping::handleVisualOdometry(const nav_msgs::msg::Odometry::SharedPtr msgIn) {
+        std::lock_guard<std::mutex> lock(mBuf);
+        visual_odom_buf.addMeas(msgIn, secs(msgIn));
+    }
+
+    void laserMapping::getOdometryFromTimestamp(MapRingBuffer<nav_msgs::msg::Odometry::SharedPtr> &buf,
+                                                const double &timestamp,
+                                                Eigen::Vector3d &T,
+                                                Eigen::Quaterniond &Q) {
+        T = Eigen::Vector3d::Zero();
+        Q = Eigen::Quaterniond::Identity();
+        if (buf.measMap_.empty()) {
+            Q = Eigen::Quaterniond(0, 0, 0, 0);
+            return;
+        }
+
+        auto it_upper = buf.measMap_.lower_bound(timestamp);
+        if (it_upper == buf.measMap_.begin()) {
+            const auto &odom = it_upper->second;
+            T = Eigen::Vector3d(odom->pose.pose.position.x, odom->pose.pose.position.y, odom->pose.pose.position.z);
+            Q = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
+                                   odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
+            return;
+        }
+        if (it_upper == buf.measMap_.end()) {
+            const auto &odom = buf.measMap_.rbegin()->second;
+            T = Eigen::Vector3d(odom->pose.pose.position.x, odom->pose.pose.position.y, odom->pose.pose.position.z);
+            Q = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
+                                   odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
+            return;
+        }
+
+        auto it_prev = std::prev(it_upper);
+        const double dt_prev = std::abs(timestamp - it_prev->first);
+        const double dt_next = std::abs(it_upper->first - timestamp);
+        const auto &odom = (dt_prev <= dt_next) ? it_prev->second : it_upper->second;
+        T = Eigen::Vector3d(odom->pose.pose.position.x, odom->pose.pose.position.y, odom->pose.pose.position.z);
+        Q = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
+                               odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
+    }
+
+    void laserMapping::extractRelativeTransform(MapRingBuffer<nav_msgs::msg::Odometry::SharedPtr> &buf,
+                                                Transformd &T_pre_cur,
+                                                bool imu_prediction) {
+        T_pre_cur = Transformd::Identity();
+        if (buf.measMap_.empty()) {
+            return;
+        }
+
+        double latest_stamp = 0.0;
+        buf.getLastTime(latest_stamp);
+        if (std::abs(latest_stamp - timeLaserOdometry) > config_.max_odom_time_diff) {
+            return;
+        }
+
+        Eigen::Vector3d t_curr = Eigen::Vector3d::Zero();
+        Eigen::Quaterniond q_curr = Eigen::Quaterniond::Identity();
+        getOdometryFromTimestamp(buf, timeLaserOdometry, t_curr, q_curr);
+        if (q_curr.w() == 0.0 || !t_curr.allFinite() || !q_curr.coeffs().allFinite()) {
+            return;
+        }
+        q_curr.normalize();
+
+        if (imu_prediction) {
+            if (!lastimuodomAvaliable) {
+                t_w_imu_pre = t_curr;
+                q_w_imu_pre = q_curr;
+                time_last_imu_odom = timeLaserOdometry;
+                lastimuodomAvaliable = true;
+                return;
+            }
+            T_pre_cur = Transformd(q_w_imu_pre, t_w_imu_pre).inverse() * Transformd(q_curr, t_curr);
+            t_w_imu_pre = t_curr;
+            q_w_imu_pre = q_curr;
+            time_last_imu_odom = timeLaserOdometry;
+            return;
+        }
+
+        if (!last_visual_odom_available) {
+            t_w_visual_pre = t_curr;
+            q_w_visual_pre = q_curr;
+            time_last_visual_odom = timeLaserOdometry;
+            last_visual_odom_available = true;
+            return;
+        }
+
+        T_pre_cur = Transformd(q_w_visual_pre, t_w_visual_pre).inverse() * Transformd(q_curr, t_curr);
+        q_w_visual_pre = q_curr;
+        t_w_visual_pre = t_curr;
+        time_last_visual_odom = timeLaserOdometry;
+    }
+
+    bool laserMapping::extractVisualIMUOdometryAndCheck() {
+        sensorMeas.vio_prediction_status = false;
+        sensorMeas.lio_prediction_status = false;
+        visual_prediction_confidence = 0.0;
+
+        const bool had_imu_history = lastimuodomAvaliable;
+        const double imu_prev_time = time_last_imu_odom;
+        Transformd lio_delta = Transformd::Identity();
+        extractRelativeTransform(imu_odom_buf, lio_delta, true);
+        const double imu_dt = std::max(1e-3, timeLaserOdometry - imu_prev_time);
+        const double lio_linear_speed = lio_delta.pos.norm() / imu_dt;
+        const Eigen::AngleAxisd lio_drot(lio_delta.rot);
+        const double lio_angular_speed = std::abs(lio_drot.angle()) / imu_dt;
+        if (had_imu_history &&
+            lio_delta.pos.allFinite() && lio_delta.rot.coeffs().allFinite() &&
+            lio_linear_speed < config_.max_visual_linear_velocity &&
+            lio_angular_speed < config_.max_visual_angular_velocity) {
+            sensorMeas.lioPrediction = lio_delta;
+            sensorMeas.lio_prediction_status = true;
+            nav_msgs::msg::Odometry pred_msg;
+            const Transformd lio_pred_pose = T_w_lidar * lio_delta;
+            pred_msg.header.frame_id = WORLD_FRAME;
+            pred_msg.child_frame_id = SENSOR_FRAME;
+            pred_msg.header.stamp = rclcpp::Time(timeLaserOdometry * 1e9);
+            pred_msg.pose.pose.position.x = lio_pred_pose.pos.x();
+            pred_msg.pose.pose.position.y = lio_pred_pose.pos.y();
+            pred_msg.pose.pose.position.z = lio_pred_pose.pos.z();
+            pred_msg.pose.pose.orientation.x = lio_pred_pose.rot.x();
+            pred_msg.pose.pose.orientation.y = lio_pred_pose.rot.y();
+            pred_msg.pose.pose.orientation.z = lio_pred_pose.rot.z();
+            pred_msg.pose.pose.orientation.w = lio_pred_pose.rot.w();
+            pubLIOPrediction->publish(pred_msg);
+        }
+
+        if (!config_.enable_visual_fusion) {
+            return sensorMeas.lio_prediction_status;
+        }
+
+        const bool had_visual_history = last_visual_odom_available;
+        const double visual_prev_time = time_last_visual_odom;
+        Transformd vio_delta = Transformd::Identity();
+        extractRelativeTransform(visual_odom_buf, vio_delta, false);
+        const double visual_dt = std::max(1e-3, timeLaserOdometry - visual_prev_time);
+        const double visual_linear_speed = vio_delta.pos.norm() / visual_dt;
+        const Eigen::AngleAxisd vio_drot(vio_delta.rot);
+        const double visual_angular_speed = std::abs(vio_drot.angle()) / visual_dt;
+
+        if (!had_visual_history || !vio_delta.pos.allFinite() || !vio_delta.rot.coeffs().allFinite()) {
+            return sensorMeas.lio_prediction_status;
+        }
+        if (visual_linear_speed > config_.max_visual_linear_velocity ||
+            visual_angular_speed > config_.max_visual_angular_velocity) {
+            return sensorMeas.lio_prediction_status;
+        }
+
+        // Confidence decreases smoothly as motion approaches rejection thresholds.
+        const double linear_conf = 1.0 - visual_linear_speed / std::max(1e-3, config_.max_visual_linear_velocity);
+        const double angular_conf = 1.0 - visual_angular_speed / std::max(1e-3, config_.max_visual_angular_velocity);
+        visual_prediction_confidence = std::max(0.0, std::min(1.0, std::min(linear_conf, angular_conf)));
+
+        if (visual_prediction_confidence < config_.visual_confidence_min) {
+            return sensorMeas.lio_prediction_status;
+        }
+
+        sensorMeas.vioPrediction = vio_delta;
+        sensorMeas.vio_prediction_status = true;
+        nav_msgs::msg::Odometry pred_msg;
+        const Transformd vio_pred_pose = T_w_lidar * vio_delta;
+        pred_msg.header.frame_id = WORLD_FRAME;
+        pred_msg.child_frame_id = SENSOR_FRAME;
+        pred_msg.header.stamp = rclcpp::Time(timeLaserOdometry * 1e9);
+        pred_msg.pose.pose.position.x = vio_pred_pose.pos.x();
+        pred_msg.pose.pose.position.y = vio_pred_pose.pos.y();
+        pred_msg.pose.pose.position.z = vio_pred_pose.pos.z();
+        pred_msg.pose.pose.orientation.x = vio_pred_pose.rot.x();
+        pred_msg.pose.pose.orientation.y = vio_pred_pose.rot.y();
+        pred_msg.pose.pose.orientation.z = vio_pred_pose.rot.z();
+        pred_msg.pose.pose.orientation.w = vio_pred_pose.rot.w();
+        pubVIOPrediction->publish(pred_msg);
+        return true;
     }
 
 
@@ -387,6 +601,9 @@ laserMapping::PredictionSource laserMapping::determinePredictionSource(){
 if(slam.isDegenerate){
     if(sensorMeas.vio_prediction_status){
         return PredictionSource::VIO_ODOM;
+    }
+    if (sensorMeas.lio_prediction_status) {
+        return PredictionSource::LIO_ODOM;
     }
     if(sensorMeas.nio_prediction_status){
         return PredictionSource::NEURAL_IMU_ODOM;
@@ -701,6 +918,7 @@ return PredictionSource::CONSTANT_VELOCITY;
 
     void laserMapping::performSLAMOptimization(){
         tf2::Quaternion imu_roll_pitch;
+        slam.Current_visual_confidence = static_cast<float>(visual_prediction_confidence);
         if(config_.use_imu_roll_pitch){  // TODO: Livox mid360 not use roll pitch angle
             slam.OptSet.use_imu_roll_pitch=true;
             imu_roll_pitch=utils::extractRollPitch(sensorMeas.imuPrediction);
@@ -776,6 +994,7 @@ return PredictionSource::CONSTANT_VELOCITY;
                 utils::ScopedTimer timer("Frame Processing");
                 mBuf.lock(); 
                 sensorMeas=extractSensorData();
+                extractVisualIMUOdometryAndCheck();
                 clearSensorData();
                 mBuf.unlock();
                 setInitialGuess();

@@ -242,6 +242,7 @@ namespace super_odometry {
         float Pos_degeneracy_threshold;
         float Ori_degeneracy_threshold;
         float Visual_confidence_factor;
+        float Current_visual_confidence = 1.0f;
         
         std::string map_dir;
         float init_x;

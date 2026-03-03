@@ -45,6 +45,7 @@ find_package(super_odometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 find_package(Eigen3 REQUIRED)
+find_package(OpenCV REQUIRED)
 find_package(Sophus REQUIRED)
 find_package(PCL REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -82,6 +83,7 @@ add_library(SuperOdomLib SHARED
   src/FeatureExtraction/featureExtraction.cpp
   src/ImuPreintegration/imuPreintegration.cpp
   src/LaserMapping/laserMapping.cpp
+  src/VisualOdometry/visualOdometry.cpp
   src/LaserMapping/lidarOptimization.cpp
   src/LaserMapping/LocalMap.cpp
   src/LidarProcess/LidarSlam.cpp
@@ -150,6 +152,20 @@ target_link_libraries(laser_mapping_node
     SuperOdomLib
 )
 
+# Visual Odometry node
+add_executable(visual_odometry_node src/visualOdometry_node.cpp)
+ament_target_dependencies(visual_odometry_node
+  rclcpp
+  nav_msgs
+  sensor_msgs
+  cv_bridge
+  image_transport
+)
+target_link_libraries(visual_odometry_node
+  ${OpenCV_LIBRARIES}
+  SuperOdomLib
+)
+
 # Install Exported Libraries
 ament_export_targets(export_super_odometry HAS_LIBRARY_TARGET)
 
@@ -175,6 +191,7 @@ install(TARGETS
   imu_preintegration_node
   feature_extraction_node
   laser_mapping_node
+  visual_odometry_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

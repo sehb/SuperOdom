@@ -55,9 +55,16 @@ namespace super_odometry {
         bool auto_voxel_size;
         bool forget_far_chunks;
         float visual_confidence_factor;
+        float visual_confidence_min;
         float pos_degeneracy_threshold;
         float ori_degeneracy_threshold;
         float yaw_ratio;
+        std::string imu_odom_topic;
+        std::string visual_odom_topic;
+        bool enable_visual_fusion;
+        double max_odom_time_diff;
+        double max_visual_linear_velocity;
+        double max_visual_angular_velocity;
         std::string map_dir;
         bool localization_mode;
         float init_x;
@@ -115,7 +122,11 @@ namespace super_odometry {
 
         void extractIMUOdometry(double timeLaserFrame, Transformd &T_w_lidar);
 
-        bool extractVisualIMUOdometryAndCheck(Transformd &T_w_lidar);
+        void handleImuOdometry(const nav_msgs::msg::Odometry::SharedPtr msgIn);
+
+        void handleVisualOdometry(const nav_msgs::msg::Odometry::SharedPtr msgIn);
+
+        bool extractVisualIMUOdometryAndCheck();
 
         void getOdometryFromTimestamp(MapRingBuffer<nav_msgs::msg::Odometry::SharedPtr> &buf, const double &timestamp,
                                  Eigen::Vector3d &T, Eigen::Quaterniond &Q);
@@ -227,6 +238,8 @@ namespace super_odometry {
         double timeLaserCloudFullRes = 0;
         double timeLaserOdometry = 0;
         double timeLaserOdometryPrev = 0;
+        double time_last_imu_odom = 0;
+        double time_last_visual_odom = 0;
 
 
         bool got_previous_map = false;
@@ -236,6 +249,7 @@ namespace super_odometry {
         bool laser_imu_sync = false;
         bool use_imu_roll_pitch_this_step = false;
         bool initialization = false;
+        bool last_visual_odom_available = false;
         bool imuodomAvailable = false;
         bool imuorientationAvailable = false;
         bool lastimuodomAvaliable=false;
@@ -298,6 +312,9 @@ namespace super_odometry {
         Eigen::Vector3d t_wodom_pre;
         Eigen::Quaterniond q_w_imu_pre;
         Eigen::Vector3d t_w_imu_pre;
+        Eigen::Quaterniond q_w_visual_pre;
+        Eigen::Vector3d t_w_visual_pre;
+        double visual_prediction_confidence = 0.0;
 
 
         laser_mapping_config config_;
